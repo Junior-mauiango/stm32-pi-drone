@@ -2,1875 +2,898 @@ from flask import Flask, request, jsonify
 import serial
 import threading
 
-
 app = Flask(__name__)
 
-
-# UART settings
-
+# UART setup
 UART_PORT = "/dev/serial0"
 UART_BAUD = 115200
 
 uart_lock = threading.Lock()
+ser = serial.Serial(UART_PORT, UART_BAUD, timeout=0.1)
+
+telemetry = {
+    "roll": 0.0,
+    "pitch": 0.0,
+    "altitude": 0.0
+}
 
 
 def send_to_stm32(message):
-
     try:
-
         with uart_lock:
-
-            ser = serial.Serial(
-                UART_PORT,
-                UART_BAUD,
-                timeout=0.1
-            )
-
             ser.write(message.encode())
-
             ser.flush()
-
-            ser.close()
 
         return True
 
-
     except serial.SerialException as error:
-
         print("UART ERROR:", error)
-
         return False
 
 
+def read_from_stm32():
+    while True:
+        try:
+            line = ser.readline().decode("utf-8", errors="ignore").strip()
 
+            if not line:
+                continue
+
+            print("STM32:", line)
+
+            if line.startswith("ROLL:"):
+                parts = line.split()
+
+                telemetry["roll"] = float(parts[0].split(":")[1])
+                telemetry["pitch"] = float(parts[1].split(":")[1])
+                telemetry["altitude"] = float(parts[2].split(":")[1])
+
+        except (ValueError, IndexError) as error:
+            print("TELEMETRY PARSE ERROR:", error)
+
+        except serial.SerialException as error:
+            print("UART READ ERROR:", error)
+
+
+# main dashboard
 @app.route("/")
 def home():
-
     return """
-    <!DOCTYPE html>
+<!DOCTYPE html>
+
+<html lang="en">
+
+<head>
+
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+<title>Drone Dashboard</title>
+
+<style>
+
+* {
+    box-sizing: border-box;
+}
+
+body {
+    background-color: #111827;
+    color: white;
+    font-family: Arial, sans-serif;
+    text-align: center;
+    margin: 0;
+    padding: 20px;
+}
+
+h1 {
+    margin-bottom: 30px;
+}
+
+.controller {
+    display: flex;
+    justify-content: center;
+    gap: 60px;
+    flex-wrap: wrap;
+}
+
+.stick-container {
+    text-align: center;
+}
+
+.joystick {
+    width: 240px;
+    height: 240px;
+    background-color: #1f2937;
+    border: 3px solid #374151;
+    border-radius: 50%;
+    position: relative;
+    margin: auto;
+    touch-action: none;
+    user-select: none;
+}
+
+.stick {
+    width: 70px;
+    height: 70px;
+    background-color: #2563eb;
+    border-radius: 50%;
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    transform: translate(-50%, -50%);
+    cursor: grab;
+}
+
+.stick:active {
+    background-color: #1d4ed8;
+    cursor: grabbing;
+}
+
+.top-label {
+    position: absolute;
+    top: 10px;
+    left: 50%;
+    transform: translateX(-50%);
+    color: #9ca3af;
+    font-size: 12px;
+}
+
+.bottom-label {
+    position: absolute;
+    bottom: 10px;
+    left: 50%;
+    transform: translateX(-50%);
+    color: #9ca3af;
+    font-size: 12px;
+}
+
+.left-label {
+    position: absolute;
+    left: 10px;
+    top: 50%;
+    transform: translateY(-50%);
+    color: #9ca3af;
+    font-size: 12px;
+}
+
+.right-label {
+    position: absolute;
+    right: 10px;
+    top: 50%;
+    transform: translateY(-50%);
+    color: #9ca3af;
+    font-size: 12px;
+}
+
+.values {
+    margin-top: 15px;
+    line-height: 1.8;
+}
+
+button {
+    color: white;
+    border: none;
+    border-radius: 12px;
+    padding: 14px 22px;
+    margin: 6px;
+    font-size: 16px;
+    cursor: pointer;
+}
 
-    <html lang="en">
+button:active {
+    transform: scale(0.96);
+}
 
-    <head>
+.arm {
+    background-color: #16a34a;
+}
 
-        <meta charset="UTF-8">
+.disarm {
+    background-color: #d97706;
+}
 
-        <meta
-            name="viewport"
-            content="width=device-width, initial-scale=1.0"
-        >
+.land {
+    background-color: #7c3aed;
+}
 
-        <title>Drone Dashboard</title>
+.emergency {
+    background-color: #dc2626;
+}
 
+.status-panel {
+    margin: 30px auto;
+    background-color: #1f2937;
+    width: min(450px, 100%);
+    padding: 20px;
+    border-radius: 15px;
+    text-align: left;
+}
 
-        <style>
+.status-panel h2 {
+    text-align: center;
+    margin-top: 0;
+}
 
-            * {
-                box-sizing: border-box;
-            }
+.status-panel p {
+    margin: 12px 0;
+}
 
+.value {
+    float: right;
+    font-weight: bold;
+}
 
-            body {
+.armed {
+    color: #22c55e;
+}
 
-                background-color: #111827;
+.disarmed {
+    color: #ef4444;
+}
 
-                color: white;
+.connected {
+    color: #22c55e;
+}
 
-                font-family: Arial, sans-serif;
+.error {
+    color: #ef4444;
+}
 
-                text-align: center;
+</style>
 
-                margin: 0;
+</head>
 
-                padding: 20px;
-            }
+<body>
 
+<h1>Drone Dashboard</h1>
 
-            h1 {
+<div class="controller">
 
-                margin-bottom: 30px;
-            }
+<!-- left stick -->
+<div class="stick-container">
 
+<h2>Throttle / Yaw</h2>
 
-            .controller {
+<div class="joystick" id="leftJoystick">
 
-                display: flex;
+<span class="top-label">Throttle +</span>
+<span class="bottom-label">Throttle -</span>
+<span class="left-label">Yaw Left</span>
+<span class="right-label">Yaw Right</span>
 
-                justify-content: center;
+<div class="stick" id="leftStick"></div>
 
-                gap: 60px;
+</div>
 
-                flex-wrap: wrap;
-            }
+<div class="values">
+Throttle: <span id="throttleValue">0</span>%
+<br>
+Yaw: <span id="yawValue">0</span>%
+</div>
 
+</div>
 
-            .stick-container {
 
-                text-align: center;
-            }
+<!-- right stick -->
+<div class="stick-container">
 
+<h2>Pitch / Roll</h2>
 
-            .joystick {
+<div class="joystick" id="rightJoystick">
 
-                width: 240px;
+<span class="top-label">Forward</span>
+<span class="bottom-label">Backward</span>
+<span class="left-label">Left</span>
+<span class="right-label">Right</span>
 
-                height: 240px;
+<div class="stick" id="rightStick"></div>
 
-                background-color: #1f2937;
+</div>
 
-                border: 3px solid #374151;
+<div class="values">
+Pitch: <span id="pitchValue">0</span>%
+<br>
+Roll: <span id="rollValue">0</span>%
+</div>
 
-                border-radius: 50%;
+</div>
 
-                position: relative;
+</div>
 
-                margin: auto;
 
-                touch-action: none;
+<!-- control buttons -->
+<div style="margin-top: 30px;">
 
-                user-select: none;
-            }
+<button class="arm" onclick="armDrone()">ARM</button>
+<button class="disarm" onclick="disarmDrone()">DISARM</button>
+<button class="land" onclick="landDrone()">LAND</button>
+<button class="emergency" onclick="emergencyStop()">EMERGENCY STOP</button>
 
+</div>
 
-            .stick {
 
-                width: 70px;
+<!-- telemetry -->
+<div class="status-panel">
 
-                height: 70px;
+<h2>Telemetry</h2>
 
-                background-color: #2563eb;
+<p>
+Drone Status:
+<span id="droneStatus" class="value disarmed">DISARMED</span>
+</p>
 
-                border-radius: 50%;
+<p>
+Throttle Command:
+<span id="telemetryThrottle" class="value">0%</span>
+</p>
 
-                position: absolute;
+<p>
+Pitch Command:
+<span id="telemetryPitch" class="value">0%</span>
+</p>
 
-                left: 50%;
+<p>
+Roll Command:
+<span id="telemetryRoll" class="value">0%</span>
+</p>
 
-                top: 50%;
+<p>
+Yaw Command:
+<span id="telemetryYaw" class="value">0%</span>
+</p>
 
-                transform: translate(-50%, -50%);
+<p>
+Actual Pitch:
+<span id="actualPitch" class="value">-- °</span>
+</p>
 
-                cursor: grab;
-            }
+<p>
+Actual Roll:
+<span id="actualRoll" class="value">-- °</span>
+</p>
 
+<p>
+Altitude:
+<span id="altitude" class="value">-- m</span>
+</p>
 
-            .stick:active {
+<p>
+Battery:
+<span id="battery" class="value">-- %</span>
+</p>
 
-                background-color: #1d4ed8;
+<p>
+UART:
+<span id="uartStatus" class="value">--</span>
+</p>
 
-                cursor: grabbing;
-            }
+</div>
 
 
-            .top-label {
+<script>
 
-                position: absolute;
+let armed = false;
 
-                top: 10px;
+let throttle = 0;
+let yaw = 0;
+let pitch = 0;
+let roll = 0;
 
-                left: 50%;
+let lastSendTime = 0;
 
-                transform: translateX(-50%);
+const leftJoystick = document.getElementById("leftJoystick");
+const leftStick = document.getElementById("leftStick");
 
-                color: #9ca3af;
+const rightJoystick = document.getElementById("rightJoystick");
+const rightStick = document.getElementById("rightStick");
 
-                font-size: 12px;
-            }
+let leftDragging = false;
+let rightDragging = false;
 
 
-            .bottom-label {
+// send joystick values
+async function sendControl()
+{
+    const now = Date.now();
 
-                position: absolute;
+    if (now - lastSendTime < 50)
+    {
+        return;
+    }
 
-                bottom: 10px;
+    lastSendTime = now;
 
-                left: 50%;
+    const packet = {
+        throttle: throttle,
+        pitch: pitch,
+        roll: roll,
+        yaw: yaw
+    };
 
-                transform: translateX(-50%);
-
-                color: #9ca3af;
-
-                font-size: 12px;
-            }
-
-
-            .left-label {
-
-                position: absolute;
-
-                left: 10px;
-
-                top: 50%;
-
-                transform: translateY(-50%);
-
-                color: #9ca3af;
-
-                font-size: 12px;
-            }
-
-
-            .right-label {
-
-                position: absolute;
-
-                right: 10px;
-
-                top: 50%;
-
-                transform: translateY(-50%);
-
-                color: #9ca3af;
-
-                font-size: 12px;
-            }
-
-
-            .values {
-
-                margin-top: 15px;
-
-                line-height: 1.8;
-            }
-
-
-            button {
-
-                color: white;
-
-                border: none;
-
-                border-radius: 12px;
-
-                padding: 14px 22px;
-
-                margin: 6px;
-
-                font-size: 16px;
-
-                cursor: pointer;
-            }
-
-
-            button:active {
-
-                transform: scale(0.96);
-            }
-
-
-            .arm {
-
-                background-color: #16a34a;
-            }
-
-
-            .disarm {
-
-                background-color: #d97706;
-            }
-
-
-            .land {
-
-                background-color: #7c3aed;
-            }
-
-
-            .emergency {
-
-                background-color: #dc2626;
-            }
-
-
-            .status-panel {
-
-                margin: 30px auto;
-
-                background-color: #1f2937;
-
-                width: min(450px, 100%);
-
-                padding: 20px;
-
-                border-radius: 15px;
-
-                text-align: left;
-            }
-
-
-            .status-panel h2 {
-
-                text-align: center;
-
-                margin-top: 0;
-            }
-
-
-            .status-panel p {
-
-                margin: 12px 0;
-            }
-
-
-            .value {
-
-                float: right;
-
-                font-weight: bold;
-            }
-
-
-            .armed {
-
-                color: #22c55e;
-            }
-
-
-            .disarmed {
-
-                color: #ef4444;
-            }
-
-
-            .connected {
-
-                color: #22c55e;
-            }
-
-
-            .error {
-
-                color: #ef4444;
-            }
-
-        </style>
-
-    </head>
-
-
-
-    <body>
-
-
-        <h1>Drone Dashboard</h1>
-
-
-
-        <div class="controller">
-
-
-            <!-- LEFT STICK -->
-
-
-            <div class="stick-container">
-
-
-                <h2>Throttle / Yaw</h2>
-
-
-                <div
-                    class="joystick"
-                    id="leftJoystick"
-                >
-
-
-                    <span class="top-label">
-                        Throttle +
-                    </span>
-
-
-                    <span class="bottom-label">
-                        Throttle -
-                    </span>
-
-
-                    <span class="left-label">
-                        Yaw Left
-                    </span>
-
-
-                    <span class="right-label">
-                        Yaw Right
-                    </span>
-
-
-                    <div
-                        class="stick"
-                        id="leftStick">
-                    </div>
-
-
-                </div>
-
-
-
-                <div class="values">
-
-
-                    Throttle:
-
-                    <span id="throttleValue">
-                        0
-                    </span>%
-
-
-                    <br>
-
-
-                    Yaw:
-
-                    <span id="yawValue">
-                        0
-                    </span>%
-
-
-                </div>
-
-
-            </div>
-
-
-
-            <!-- RIGHT STICK -->
-
-
-            <div class="stick-container">
-
-
-                <h2>Pitch / Roll</h2>
-
-
-                <div
-                    class="joystick"
-                    id="rightJoystick"
-                >
-
-
-                    <span class="top-label">
-                        Forward
-                    </span>
-
-
-                    <span class="bottom-label">
-                        Backward
-                    </span>
-
-
-                    <span class="left-label">
-                        Left
-                    </span>
-
-
-                    <span class="right-label">
-                        Right
-                    </span>
-
-
-                    <div
-                        class="stick"
-                        id="rightStick">
-                    </div>
-
-
-                </div>
-
-
-
-                <div class="values">
-
-
-                    Pitch:
-
-                    <span id="pitchValue">
-                        0
-                    </span>%
-
-
-                    <br>
-
-
-                    Roll:
-
-                    <span id="rollValue">
-                        0
-                    </span>%
-
-
-                </div>
-
-
-            </div>
-
-
-        </div>
-
-
-
-        <!-- DRONE COMMANDS -->
-
-
-        <div style="margin-top: 30px;">
-
-
-            <button
-                class="arm"
-                onclick="armDrone()">
-
-                ARM
-
-            </button>
-
-
-            <button
-                class="disarm"
-                onclick="disarmDrone()">
-
-                DISARM
-
-            </button>
-
-
-            <button
-                class="land"
-                onclick="landDrone()">
-
-                LAND
-
-            </button>
-
-
-            <button
-                class="emergency"
-                onclick="emergencyStop()">
-
-                EMERGENCY STOP
-
-            </button>
-
-
-        </div>
-
-
-
-        <!-- TELEMETRY -->
-
-
-        <div class="status-panel">
-
-
-            <h2>Telemetry</h2>
-
-
-            <p>
-
-                Drone Status:
-
-                <span
-                    id="droneStatus"
-                    class="value disarmed">
-
-                    DISARMED
-
-                </span>
-
-            </p>
-
-
-            <p>
-
-                Throttle:
-
-                <span
-                    id="telemetryThrottle"
-                    class="value">
-
-                    0%
-
-                </span>
-
-            </p>
-
-
-            <p>
-
-                Pitch:
-
-                <span
-                    id="telemetryPitch"
-                    class="value">
-
-                    0%
-
-                </span>
-
-            </p>
-
-
-            <p>
-
-                Roll:
-
-                <span
-                    id="telemetryRoll"
-                    class="value">
-
-                    0%
-
-                </span>
-
-            </p>
-
-
-            <p>
-
-                Yaw:
-
-                <span
-                    id="telemetryYaw"
-                    class="value">
-
-                    0%
-
-                </span>
-
-            </p>
-
-
-            <p>
-
-                Altitude:
-
-                <span
-                    id="altitude"
-                    class="value">
-
-                    -- m
-
-                </span>
-
-            </p>
-
-
-            <p>
-
-                Battery:
-
-                <span
-                    id="battery"
-                    class="value">
-
-                    -- %
-
-                </span>
-
-            </p>
-
-
-            <p>
-
-                UART:
-
-                <span
-                    id="uartStatus"
-                    class="value">
-
-                    --
-
-                </span>
-
-            </p>
-
-
-        </div>
-
-
-
-        <script>
-
-
-            let armed = false;
-
-
-            let throttle = 0;
-
-            let yaw = 0;
-
-            let pitch = 0;
-
-            let roll = 0;
-
-
-            let lastSendTime = 0;
-
-
-
-            const leftJoystick =
-                document.getElementById(
-                    "leftJoystick"
-                );
-
-
-            const leftStick =
-                document.getElementById(
-                    "leftStick"
-                );
-
-
-            const rightJoystick =
-                document.getElementById(
-                    "rightJoystick"
-                );
-
-
-            const rightStick =
-                document.getElementById(
-                    "rightStick"
-                );
-
-
-            let leftDragging = false;
-
-            let rightDragging = false;
-
-
-
-            // --------------------------------------------------
-            // SEND CONTROL PACKET
-            // --------------------------------------------------
-
-
-            async function sendControl()
+    try
+    {
+        const response = await fetch(
+            "/control",
             {
+                method: "POST",
 
-                /*
-                 * Limit UART updates to about
-                 * 20 packets per second.
-                 */
+                headers: {
+                    "Content-Type": "application/json"
+                },
 
-                const now = Date.now();
-
-
-                if (now - lastSendTime < 50)
-                {
-                    return;
-                }
-
-
-                lastSendTime = now;
-
-
-
-                const packet = {
-
-                    throttle: throttle,
-
-                    pitch: pitch,
-
-                    roll: roll,
-
-                    yaw: yaw
-                };
-
-
-                try
-                {
-
-                    const response =
-                        await fetch(
-                            "/control",
-                            {
-                                method: "POST",
-
-                                headers:
-                                {
-                                    "Content-Type":
-                                        "application/json"
-                                },
-
-                                body:
-                                    JSON.stringify(
-                                        packet
-                                    )
-                            }
-                        );
-
-
-                    const data =
-                        await response.json();
-
-
-                    if (data.success)
-                    {
-
-                        document.getElementById(
-                            "uartStatus"
-                        ).innerText =
-                            "CONNECTED";
-
-
-                        document.getElementById(
-                            "uartStatus"
-                        ).className =
-                            "value connected";
-                    }
-
-                    else
-                    {
-
-                        document.getElementById(
-                            "uartStatus"
-                        ).innerText =
-                            "ERROR";
-
-
-                        document.getElementById(
-                            "uartStatus"
-                        ).className =
-                            "value error";
-                    }
-
-
-                }
-
-                catch (error)
-                {
-
-                    document.getElementById(
-                        "uartStatus"
-                    ).innerText =
-                        "ERROR";
-
-
-                    console.error(error);
-                }
-
+                body: JSON.stringify(packet)
             }
+        );
+
+        const data = await response.json();
+
+        if (data.success)
+        {
+            document.getElementById("uartStatus").innerText = "CONNECTED";
+            document.getElementById("uartStatus").className = "value connected";
+        }
+
+        else
+        {
+            document.getElementById("uartStatus").innerText = "ERROR";
+            document.getElementById("uartStatus").className = "value error";
+        }
+    }
+
+    catch (error)
+    {
+        document.getElementById("uartStatus").innerText = "ERROR";
+        document.getElementById("uartStatus").className = "value error";
+
+        console.error(error);
+    }
+}
 
 
-
-            // --------------------------------------------------
-            // SEND SPECIAL COMMAND
-            // --------------------------------------------------
-
-
-            async function sendCommand(command)
+// send arm, disarm, land, and estop commands
+async function sendCommand(command)
+{
+    try
+    {
+        const response = await fetch(
+            "/command",
             {
+                method: "POST",
 
-                try
-                {
+                headers: {
+                    "Content-Type": "application/json"
+                },
 
-                    const response =
-                        await fetch(
-                            "/command",
-                            {
-                                method: "POST",
-
-                                headers:
-                                {
-                                    "Content-Type":
-                                        "application/json"
-                                },
-
-                                body:
-                                    JSON.stringify(
-                                        {
-                                            command:
-                                                command
-                                        }
-                                    )
-                            }
-                        );
-
-
-                    const data =
-                        await response.json();
-
-
-                    if (data.success)
-                    {
-
-                        document.getElementById(
-                            "uartStatus"
-                        ).innerText =
-                            "CONNECTED";
-
-
-                        document.getElementById(
-                            "uartStatus"
-                        ).className =
-                            "value connected";
-                    }
-
-                    else
-                    {
-
-                        document.getElementById(
-                            "uartStatus"
-                        ).innerText =
-                            "ERROR";
-
-
-                        document.getElementById(
-                            "uartStatus"
-                        ).className =
-                            "value error";
-                    }
-
-
-                }
-
-                catch (error)
-                {
-
-                    document.getElementById(
-                        "uartStatus"
-                    ).innerText =
-                        "ERROR";
-
-
-                    console.error(error);
-                }
-
+                body: JSON.stringify({
+                    command: command
+                })
             }
+        );
+
+        const data = await response.json();
+
+        if (data.success)
+        {
+            document.getElementById("uartStatus").innerText = "CONNECTED";
+            document.getElementById("uartStatus").className = "value connected";
+        }
+
+        else
+        {
+            document.getElementById("uartStatus").innerText = "ERROR";
+            document.getElementById("uartStatus").className = "value error";
+        }
+    }
 
+    catch (error)
+    {
+        document.getElementById("uartStatus").innerText = "ERROR";
+        document.getElementById("uartStatus").className = "value error";
+
+        console.error(error);
+    }
+}
 
 
-            // --------------------------------------------------
-            // LEFT STICK
-            // --------------------------------------------------
+// update telemetry from stm32
+async function updateTelemetry()
+{
+    try
+    {
+        const response = await fetch("/telemetry");
+        const data = await response.json();
 
+        document.getElementById("actualRoll").innerText =
+            data.roll.toFixed(2) + "°";
 
-            leftStick.addEventListener(
-                "pointerdown",
-                function(event)
-                {
+        document.getElementById("actualPitch").innerText =
+            data.pitch.toFixed(2) + "°";
 
-                    leftDragging = true;
+        document.getElementById("altitude").innerText =
+            data.altitude.toFixed(2) + " m";
+    }
 
+    catch (error)
+    {
+        console.error("Telemetry error:", error);
+    }
+}
 
-                    leftStick.setPointerCapture(
-                        event.pointerId
-                    );
-                }
-            );
 
+// left joystick
+leftStick.addEventListener(
+    "pointerdown",
+    function(event)
+    {
+        leftDragging = true;
+        leftStick.setPointerCapture(event.pointerId);
+    }
+);
+
+
+leftStick.addEventListener(
+    "pointermove",
+    function(event)
+    {
+        if (!leftDragging)
+        {
+            return;
+        }
 
+        moveLeftStick(event);
+        sendControl();
+    }
+);
+
+
+leftStick.addEventListener(
+    "pointerup",
+    function()
+    {
+        leftDragging = false;
+        yaw = 0;
 
-            leftStick.addEventListener(
-                "pointermove",
-                function(event)
-                {
+        document.getElementById("yawValue").innerText = 0;
+        document.getElementById("telemetryYaw").innerText = "0%";
 
-                    if (!leftDragging)
-                    {
-                        return;
-                    }
+        updateLeftStick();
+        sendControl();
+    }
+);
 
 
-                    moveLeftStick(event);
+function moveLeftStick(event)
+{
+    const rect = leftJoystick.getBoundingClientRect();
 
-                    sendControl();
-                }
-            );
+    const centerX = rect.width / 2;
+    const centerY = rect.height / 2;
+    const maxDistance = rect.width / 2 - 35;
 
+    let x = event.clientX - rect.left - centerX;
+    let y = event.clientY - rect.top - centerY;
 
+    x = Math.max(-maxDistance, Math.min(maxDistance, x));
+    y = Math.max(-maxDistance, Math.min(maxDistance, y));
 
-            leftStick.addEventListener(
-                "pointerup",
-                function()
-                {
+    yaw = Math.round((x / maxDistance) * 100);
 
-                    leftDragging = false;
+    throttle = Math.round(
+        ((maxDistance - y) / (2 * maxDistance)) * 100
+    );
 
+    throttle = Math.max(0, Math.min(100, throttle));
 
-                    /*
-                     * Throttle stays where
-                     * it was released.
-                     *
-                     * Yaw returns to zero.
-                     */
+    document.getElementById("yawValue").innerText = yaw;
+    document.getElementById("throttleValue").innerText = throttle;
 
+    document.getElementById("telemetryThrottle").innerText =
+        throttle + "%";
 
-                    yaw = 0;
+    document.getElementById("telemetryYaw").innerText =
+        yaw + "%";
 
+    leftStick.style.left = centerX + x + "px";
+    leftStick.style.top = centerY + y + "px";
+}
 
-                    document.getElementById(
-                        "yawValue"
-                    ).innerText = 0;
 
+function updateLeftStick()
+{
+    const rect = leftJoystick.getBoundingClientRect();
+    const maxDistance = rect.width / 2 - 35;
 
-                    document.getElementById(
-                        "telemetryYaw"
-                    ).innerText = "0%";
+    const y =
+        maxDistance -
+        (throttle / 100) *
+        (2 * maxDistance);
 
+    leftStick.style.left = "50%";
+    leftStick.style.top = (rect.height / 2 + y) + "px";
+}
 
-                    updateLeftStick();
 
+// right joystick
+rightStick.addEventListener(
+    "pointerdown",
+    function(event)
+    {
+        rightDragging = true;
+        rightStick.setPointerCapture(event.pointerId);
+    }
+);
 
-                    sendControl();
-                }
-            );
 
+rightStick.addEventListener(
+    "pointermove",
+    function(event)
+    {
+        if (!rightDragging)
+        {
+            return;
+        }
 
+        moveRightStick(event);
+        sendControl();
+    }
+);
 
-            function moveLeftStick(event)
-            {
 
-                const rect =
-                    leftJoystick
-                    .getBoundingClientRect();
+rightStick.addEventListener(
+    "pointerup",
+    function()
+    {
+        rightDragging = false;
 
+        pitch = 0;
+        roll = 0;
 
-                const centerX =
-                    rect.width / 2;
+        document.getElementById("pitchValue").innerText = 0;
+        document.getElementById("rollValue").innerText = 0;
 
+        document.getElementById("telemetryPitch").innerText = "0%";
+        document.getElementById("telemetryRoll").innerText = "0%";
 
-                const centerY =
-                    rect.height / 2;
+        rightStick.style.left = "50%";
+        rightStick.style.top = "50%";
 
+        sendControl();
+    }
+);
 
-                const maxDistance =
-                    rect.width / 2 - 35;
 
+function moveRightStick(event)
+{
+    const rect = rightJoystick.getBoundingClientRect();
 
+    const centerX = rect.width / 2;
+    const centerY = rect.height / 2;
+    const maxDistance = rect.width / 2 - 35;
 
-                let x =
-                    event.clientX
-                    - rect.left
-                    - centerX;
+    let x = event.clientX - rect.left - centerX;
+    let y = event.clientY - rect.top - centerY;
 
+    x = Math.max(-maxDistance, Math.min(maxDistance, x));
+    y = Math.max(-maxDistance, Math.min(maxDistance, y));
 
-                let y =
-                    event.clientY
-                    - rect.top
-                    - centerY;
+    roll = Math.round((x / maxDistance) * 100);
+    pitch = Math.round((-y / maxDistance) * 100);
 
+    document.getElementById("pitchValue").innerText = pitch;
+    document.getElementById("rollValue").innerText = roll;
 
+    document.getElementById("telemetryPitch").innerText =
+        pitch + "%";
 
-                x = Math.max(
-                    -maxDistance,
-                    Math.min(
-                        maxDistance,
-                        x
-                    )
-                );
+    document.getElementById("telemetryRoll").innerText =
+        roll + "%";
 
+    rightStick.style.left = centerX + x + "px";
+    rightStick.style.top = centerY + y + "px";
+}
 
-                y = Math.max(
-                    -maxDistance,
-                    Math.min(
-                        maxDistance,
-                        y
-                    )
-                );
 
+// arm drone
+function armDrone()
+{
+    armed = true;
 
+    sendCommand("ARM");
 
-                yaw = Math.round(
-                    (x / maxDistance)
-                    * 100
-                );
+    const status = document.getElementById("droneStatus");
 
+    status.innerText = "ARMED";
+    status.classList.remove("disarmed");
+    status.classList.add("armed");
+}
 
 
-                throttle = Math.round(
-                    (
-                        (
-                            maxDistance - y
-                        )
-                        /
-                        (
-                            2 * maxDistance
-                        )
-                    )
-                    * 100
-                );
+// disarm drone
+function disarmDrone()
+{
+    armed = false;
 
+    throttle = 0;
+    pitch = 0;
+    roll = 0;
+    yaw = 0;
 
+    resetSticks();
+    sendCommand("DISARM");
 
-                throttle =
-                    Math.max(
-                        0,
-                        Math.min(
-                            100,
-                            throttle
-                        )
-                    );
+    const status = document.getElementById("droneStatus");
 
+    status.innerText = "DISARMED";
+    status.classList.remove("armed");
+    status.classList.add("disarmed");
+}
 
 
-                document.getElementById(
-                    "yawValue"
-                ).innerText =
-                    yaw;
+// land drone
+function landDrone()
+{
+    if (!armed)
+    {
+        return;
+    }
 
+    sendCommand("LAND");
 
+    document.getElementById("droneStatus").innerText = "LANDING";
+}
 
-                document.getElementById(
-                    "throttleValue"
-                ).innerText =
-                    throttle;
 
+// emergency stop
+function emergencyStop()
+{
+    armed = false;
 
+    throttle = 0;
+    pitch = 0;
+    roll = 0;
+    yaw = 0;
 
-                document.getElementById(
-                    "telemetryThrottle"
-                ).innerText =
-                    throttle + "%";
+    resetSticks();
+    sendCommand("ESTOP");
 
+    const status = document.getElementById("droneStatus");
 
+    status.innerText = "EMERGENCY STOP";
+    status.classList.remove("armed");
+    status.classList.add("disarmed");
+}
 
-                document.getElementById(
-                    "telemetryYaw"
-                ).innerText =
-                    yaw + "%";
 
+// reset joystick values
+function resetSticks()
+{
+    document.getElementById("throttleValue").innerText = 0;
+    document.getElementById("yawValue").innerText = 0;
+    document.getElementById("pitchValue").innerText = 0;
+    document.getElementById("rollValue").innerText = 0;
 
+    document.getElementById("telemetryThrottle").innerText = "0%";
+    document.getElementById("telemetryYaw").innerText = "0%";
+    document.getElementById("telemetryPitch").innerText = "0%";
+    document.getElementById("telemetryRoll").innerText = "0%";
 
-                leftStick.style.left =
-                    centerX
-                    + x
-                    + "px";
+    updateLeftStick();
 
+    rightStick.style.left = "50%";
+    rightStick.style.top = "50%";
+}
 
 
-                leftStick.style.top =
-                    centerY
-                    + y
-                    + "px";
-            }
+// start dashboard
+window.onload = function()
+{
+    throttle = 0;
+    pitch = 0;
+    roll = 0;
+    yaw = 0;
 
+    updateLeftStick();
+    updateTelemetry();
+};
 
 
-            function updateLeftStick()
-            {
+setInterval(updateTelemetry, 200);
 
-                const rect =
-                    leftJoystick
-                    .getBoundingClientRect();
+</script>
 
+</body>
 
-                const maxDistance =
-                    rect.width / 2 - 35;
+</html>
+"""
 
 
+# send telemetry to dashboard
+@app.route("/telemetry")
+def get_telemetry():
+    return jsonify(telemetry)
 
-                const y =
-                    maxDistance
-                    -
-                    (
-                        throttle / 100
-                    )
-                    *
-                    (
-                        2
-                        * maxDistance
-                    );
 
-
-
-                leftStick.style.left =
-                    "50%";
-
-
-                leftStick.style.top =
-                    (
-                        rect.height / 2
-                        + y
-                    )
-                    + "px";
-            }
-
-
-
-            // --------------------------------------------------
-            // RIGHT STICK
-            // --------------------------------------------------
-
-
-            rightStick.addEventListener(
-                "pointerdown",
-                function(event)
-                {
-
-                    rightDragging = true;
-
-
-                    rightStick.setPointerCapture(
-                        event.pointerId
-                    );
-                }
-            );
-
-
-
-            rightStick.addEventListener(
-                "pointermove",
-                function(event)
-                {
-
-                    if (!rightDragging)
-                    {
-                        return;
-                    }
-
-
-                    moveRightStick(event);
-
-                    sendControl();
-                }
-            );
-
-
-
-            rightStick.addEventListener(
-                "pointerup",
-                function()
-                {
-
-                    rightDragging = false;
-
-
-                    /*
-                     * Pitch and roll both
-                     * return to zero.
-                     */
-
-
-                    pitch = 0;
-
-                    roll = 0;
-
-
-
-                    document.getElementById(
-                        "pitchValue"
-                    ).innerText = 0;
-
-
-                    document.getElementById(
-                        "rollValue"
-                    ).innerText = 0;
-
-
-                    document.getElementById(
-                        "telemetryPitch"
-                    ).innerText = "0%";
-
-
-                    document.getElementById(
-                        "telemetryRoll"
-                    ).innerText = "0%";
-
-
-
-                    rightStick.style.left =
-                        "50%";
-
-
-                    rightStick.style.top =
-                        "50%";
-
-
-                    sendControl();
-                }
-            );
-
-
-
-            function moveRightStick(event)
-            {
-
-                const rect =
-                    rightJoystick
-                    .getBoundingClientRect();
-
-
-                const centerX =
-                    rect.width / 2;
-
-
-                const centerY =
-                    rect.height / 2;
-
-
-                const maxDistance =
-                    rect.width / 2 - 35;
-
-
-
-                let x =
-                    event.clientX
-                    - rect.left
-                    - centerX;
-
-
-                let y =
-                    event.clientY
-                    - rect.top
-                    - centerY;
-
-
-
-                x = Math.max(
-                    -maxDistance,
-                    Math.min(
-                        maxDistance,
-                        x
-                    )
-                );
-
-
-                y = Math.max(
-                    -maxDistance,
-                    Math.min(
-                        maxDistance,
-                        y
-                    )
-                );
-
-
-
-                roll = Math.round(
-                    (
-                        x
-                        / maxDistance
-                    )
-                    * 100
-                );
-
-
-
-                pitch = Math.round(
-                    (
-                        -y
-                        / maxDistance
-                    )
-                    * 100
-                );
-
-
-
-                document.getElementById(
-                    "pitchValue"
-                ).innerText =
-                    pitch;
-
-
-
-                document.getElementById(
-                    "rollValue"
-                ).innerText =
-                    roll;
-
-
-
-                document.getElementById(
-                    "telemetryPitch"
-                ).innerText =
-                    pitch + "%";
-
-
-
-                document.getElementById(
-                    "telemetryRoll"
-                ).innerText =
-                    roll + "%";
-
-
-
-                rightStick.style.left =
-                    centerX
-                    + x
-                    + "px";
-
-
-                rightStick.style.top =
-                    centerY
-                    + y
-                    + "px";
-            }
-
-
-
-            // --------------------------------------------------
-            // ARM
-            // --------------------------------------------------
-
-
-            function armDrone()
-            {
-
-                armed = true;
-
-
-                sendCommand("ARM");
-
-
-                const status =
-                    document.getElementById(
-                        "droneStatus"
-                    );
-
-
-                status.innerText =
-                    "ARMED";
-
-
-                status.classList.remove(
-                    "disarmed"
-                );
-
-
-                status.classList.add(
-                    "armed"
-                );
-            }
-
-
-
-            // --------------------------------------------------
-            // DISARM
-            // --------------------------------------------------
-
-
-            function disarmDrone()
-            {
-
-                armed = false;
-
-
-                throttle = 0;
-
-                pitch = 0;
-
-                roll = 0;
-
-                yaw = 0;
-
-
-                resetSticks();
-
-
-                sendCommand("DISARM");
-
-
-                const status =
-                    document.getElementById(
-                        "droneStatus"
-                    );
-
-
-                status.innerText =
-                    "DISARMED";
-
-
-                status.classList.remove(
-                    "armed"
-                );
-
-
-                status.classList.add(
-                    "disarmed"
-                );
-            }
-
-
-
-            // --------------------------------------------------
-            // LAND
-            // --------------------------------------------------
-
-
-            function landDrone()
-            {
-
-                if (!armed)
-                {
-                    return;
-                }
-
-
-                sendCommand("LAND");
-
-
-                document.getElementById(
-                    "droneStatus"
-                ).innerText =
-                    "LANDING";
-            }
-
-
-
-            // --------------------------------------------------
-            // EMERGENCY STOP
-            // --------------------------------------------------
-
-
-            function emergencyStop()
-            {
-
-                armed = false;
-
-
-                throttle = 0;
-
-                pitch = 0;
-
-                roll = 0;
-
-                yaw = 0;
-
-
-                resetSticks();
-
-
-                sendCommand("ESTOP");
-
-
-                const status =
-                    document.getElementById(
-                        "droneStatus"
-                    );
-
-
-                status.innerText =
-                    "EMERGENCY STOP";
-
-
-                status.classList.remove(
-                    "armed"
-                );
-
-
-                status.classList.add(
-                    "disarmed"
-                );
-            }
-
-
-
-            // --------------------------------------------------
-            // RESET STICKS
-            // --------------------------------------------------
-
-
-            function resetSticks()
-            {
-
-                document.getElementById(
-                    "throttleValue"
-                ).innerText = 0;
-
-
-                document.getElementById(
-                    "yawValue"
-                ).innerText = 0;
-
-
-                document.getElementById(
-                    "pitchValue"
-                ).innerText = 0;
-
-
-                document.getElementById(
-                    "rollValue"
-                ).innerText = 0;
-
-
-
-                document.getElementById(
-                    "telemetryThrottle"
-                ).innerText = "0%";
-
-
-                document.getElementById(
-                    "telemetryYaw"
-                ).innerText = "0%";
-
-
-                document.getElementById(
-                    "telemetryPitch"
-                ).innerText = "0%";
-
-
-                document.getElementById(
-                    "telemetryRoll"
-                ).innerText = "0%";
-
-
-
-                updateLeftStick();
-
-
-                rightStick.style.left =
-                    "50%";
-
-
-                rightStick.style.top =
-                    "50%";
-            }
-
-
-
-            // --------------------------------------------------
-            // PAGE START
-            // --------------------------------------------------
-
-
-            window.onload = function()
-            {
-
-                throttle = 0;
-
-                pitch = 0;
-
-                roll = 0;
-
-                yaw = 0;
-
-
-                updateLeftStick();
-
-            };
-
-
-        </script>
-
-
-    </body>
-
-
-    </html>
-    """
-
-
-# ------------------------------------------------------------
-# RECEIVE JOYSTICK VALUES FROM WEBSITE
-# ------------------------------------------------------------
-
-
+# send joystick commands to stm32
 @app.route("/control", methods=["POST"])
 def control():
-
-
-    data = request.get_json(
-        silent=True
-    )
-
+    data = request.get_json(silent=True)
 
     if not data:
+        return jsonify({"success": False})
 
-        return jsonify(
-            {
-                "success": False
-            }
-        )
+    throttle = int(data.get("throttle", 0))
+    pitch = int(data.get("pitch", 0))
+    roll = int(data.get("roll", 0))
+    yaw = int(data.get("yaw", 0))
 
+    throttle = max(0, min(100, throttle))
+    pitch = max(-100, min(100, pitch))
+    roll = max(-100, min(100, roll))
+    yaw = max(-100, min(100, yaw))
 
-    throttle = int(
-        data.get(
-            "throttle",
-            0
-        )
-    )
+    message = f"J,{throttle},{pitch},{roll},{yaw}\n"
 
+    print("CONTROL:", message.strip())
 
-    pitch = int(
-        data.get(
-            "pitch",
-            0
-        )
-    )
+    success = send_to_stm32(message)
 
-
-    roll = int(
-        data.get(
-            "roll",
-            0
-        )
-    )
+    return jsonify({
+        "success": success
+    })
 
 
-    yaw = int(
-        data.get(
-            "yaw",
-            0
-        )
-    )
-
-
-
-    # Limit values
-
-
-    throttle = max(
-        0,
-        min(
-            100,
-            throttle
-        )
-    )
-
-
-    pitch = max(
-        -100,
-        min(
-            100,
-            pitch
-        )
-    )
-
-
-    roll = max(
-        -100,
-        min(
-            100,
-            roll
-        )
-    )
-
-
-    yaw = max(
-        -100,
-        min(
-            100,
-            yaw
-        )
-    )
-
-
-
-    # Build STM32 packet
-
-
-    message = (
-
-        f"T:{throttle} "
-
-        f"P:{pitch} "
-
-        f"R:{roll} "
-
-        f"Y:{yaw}\\n"
-
-    )
-
-
-
-    print(
-        "CONTROL:",
-        message.strip()
-    )
-
-
-
-    success =
-        send_to_stm32(
-            message
-        )
-
-
-
-    return jsonify(
-        {
-            "success":
-                success
-        }
-    )
-
-
-
-# ------------------------------------------------------------
-# RECEIVE SPECIAL COMMAND FROM WEBSITE
-# ------------------------------------------------------------
-
-
+# send special commands to stm32
 @app.route("/command", methods=["POST"])
 def command():
-
-
-    data = request.get_json(
-        silent=True
-    )
-
+    data = request.get_json(silent=True)
 
     if not data:
+        return jsonify({"success": False})
 
-        return jsonify(
-            {
-                "success": False
-            }
-        )
+    command = str(data.get("command", "")).upper()
 
-
-
-    command =
-        str(
-            data.get(
-                "command",
-                ""
-            )
-        ).upper()
-
-
-
-    valid_commands =
-        [
-            "ARM",
-            "DISARM",
-            "LAND",
-            "ESTOP"
-        ]
-
-
+    valid_commands = [
+        "ARM",
+        "DISARM",
+        "LAND",
+        "ESTOP"
+    ]
 
     if command not in valid_commands:
+        return jsonify({"success": False})
 
-        return jsonify(
-            {
-                "success": False
-            }
-        )
+    if command == "ARM":
+        message = "A\n"
 
+    elif command == "DISARM":
+        message = "D\n"
 
+    elif command == "LAND":
+        message = "L\n"
 
-    message =
-        f"CMD:{command}\\n"
+    else:
+        message = "E\n"
 
+    print("COMMAND:", message.strip())
 
+    success = send_to_stm32(message)
 
-    print(
-        "COMMAND:",
-        message.strip()
-    )
-
-
-
-    success =
-        send_to_stm32(
-            message
-        )
+    return jsonify({
+        "success": success
+    })
 
 
-
-    return jsonify(
-        {
-            "success":
-                success
-        }
-    )
-
-
-
+# start flask server
 if __name__ == "__main__":
+    telemetry_thread = threading.Thread(
+        target=read_from_stm32,
+        daemon=True
+    )
 
+    telemetry_thread.start()
 
     app.run(
-
         host="0.0.0.0",
-
         port=5001,
-
         debug=False
     )
